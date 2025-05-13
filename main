@@ -1,0 +1,224 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import scipy.stats as stats
+import socket
+import struct
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.model_selection import train_test_split, GridSearchCV, KFold, cross_val_score
+from sklearn.metrics import accuracy_score, roc_curve, auc, classification_report, confusion_matrix
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+
+import warnings
+warnings.filterwarnings('ignore')
+
+# Load datasets
+data = pd.read_csv(r"C:\Users\cskbu\OneDrive\Desktop\fraudde\Fraud_Data.csv")
+ip_data = pd.read_csv(r"C:\Users\cskbu\OneDrive\Desktop\fraudde\IpAddress_to_Country.csv")
+
+# Month-wise bar plot for fraud
+data1 = data.copy()
+data1['purchase_time'] = pd.to_datetime(data1['purchase_time'])
+data1['month'] = data1['purchase_time'].dt.month
+data1['month'].replace({
+    1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr',
+    5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug',
+    9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+}, inplace=True)
+
+fraud_group = data1[data1['class'] == 1].groupby('month')['user_id'].count()
+fraud_group.plot(kind='bar')
+plt.title("Fraud Count by Month")
+plt.show()
+
+# Univariate analysis
+fig, ax = plt.subplots(1, 3, figsize=(20, 5))
+sns.countplot(data['class'], ax=ax[0])
+sns.countplot(data['sex'], ax=ax[1])
+sns.countplot(data['browser'], ax=ax[2])
+plt.tight_layout()
+plt.show()
+
+# Time difference features
+def diffrence_time(a, b):
+    from datetime import datetime
+    datetimeFormat = '%d-%m-%Y %H:%M'
+    diff_time = []
+    for i in range(len(a)):
+        try:
+            signup = datetime.strptime(a[i], datetimeFormat)
+            purchase = datetime.strptime(b[i], datetimeFormat)
+            diff = (purchase - signup).total_seconds()
+            diff_time.append(diff)
+        except:
+            diff_time.append(0)
+    data['diff_time'] = diff_time
+    data.drop(columns=['signup_time', 'purchase_time'], inplace=True)
+
+diffrence_time(data['signup_time'], data['purchase_time'])
+
+# Time difference by fraud class
+group = data.groupby('class')['diff_time'].mean()
+plt.plot(group, 'o-', label='Avg Time Diff')
+plt.xlabel('Fraud Class')
+plt.ylabel('Avg Time Difference (seconds)')
+plt.legend()
+plt.show()
+
+# Device and IP grouping
+device_group = data.groupby('device_id')['user_id'].nunique()
+data = data.merge(device_group.rename('num_used_device'), on='device_id')
+mean_device = data.groupby('class')['num_used_device'].mean()
+plt.plot(mean_device, 'o-', label='User per Device')
+plt.xlabel('Fraud Class')
+plt.ylabel('Avg Users per Device')
+plt.legend()
+plt.show()
+
+ip_group = data.groupby('ip_address')['user_id'].nunique()
+data = data.merge(ip_group.rename('num_ip_repeat'), on='ip_address')
+mean_ip = data.groupby('class')['num_ip_repeat'].mean()
+plt.plot(mean_ip, 'o-', label='User per IP')
+plt.xlabel('Fraud Class')
+plt.ylabel('Avg Users per IP')
+plt.legend()
+plt.show()
+
+# ✅ Convert IP addresses from string to int
+def ip_to_int(ip_str):
+    try:
+        return struct.unpack("!I", socket.inet_aton(ip_str))[0]
+    except:
+        return 0
+
+data['ip_int'] = data['ip_address'].apply(ip_to_int)
+ip_data['lower_bound_ip_address'] = ip_data['lower_bound_ip_address'].astype(float).astype(int)
+ip_data['upper_bound_ip_address'] = ip_data['upper_bound_ip_address'].astype(float).astype(int)
+
+# Map IPs to countries
+def get_country(ip_int):
+    row = ip_data[(ip_data['lower_bound_ip_address'] <= ip_int) & 
+                  (ip_data['upper_bound_ip_address'] >= ip_int)]
+    if not row.empty:
+        return row.iloc[0]['country']
+    else:
+        return 'others'
+
+data['country'] = data['ip_int'].apply(get_country)
+
+# Group rare countries as 'others'
+top_countries = data['country'].value_counts().nlargest(50).index
+data['country'] = data['country'].apply(lambda x: x if x in top_countries else 'others')
+
+# Prepare data for modeling
+X = data.drop(columns=['user_id', 'class', 'ip_address'])
+
+y = data['class']
+
+le = LabelEncoder()
+for col in ['device_id', 'source', 'browser', 'sex', 'country']:
+    X[col] = le.fit_transform(X[col])
+
+# Train-test split
+x_train, x_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=1)
+
+# Logistic Regression
+log_model = LogisticRegression().fit(x_train, y_train)
+y_pred = log_model.predict(x_test)
+
+# Model comparisons with cross-validation
+models = [
+    ('Logistic Regression', LogisticRegression()),
+    ('Decision Tree', DecisionTreeClassifier()),
+    ('Random Forest', RandomForestClassifier()),
+    ('KNN', KNeighborsClassifier()),
+    ('Naive Bayes', GaussianNB())
+]
+
+print("\nCross-Validation Scores:")
+seed = 7
+for name, model in models:
+    kfold = KFold(n_splits=10, shuffle=True, random_state=seed)
+    results = cross_val_score(model, x_train, y_train, cv=kfold, scoring='accuracy')
+    print(f"{name}: {results.mean():.4f} ({results.std():.4f})")
+
+# Random Forest Evaluation
+rf = RandomForestClassifier(n_estimators=100).fit(x_train, y_train)
+rf_preds = rf.predict(x_test)
+rf_score = accuracy_score(y_test, rf_preds)
+print(f"\nRandom Forest Accuracy: {rf_score:.4f}")
+
+# Confusion Matrix
+rf_cm = confusion_matrix(y_test, rf_preds)
+sns.heatmap(rf_cm, annot=True, fmt='d', cmap='Blues')
+plt.title("Random Forest Confusion Matrix")
+plt.show()
+
+# ROC Curve
+rf_proba = rf.predict_proba(x_test)[:, 1]
+gb = GradientBoostingClassifier().fit(x_train, y_train)
+gb_proba = gb.predict_proba(x_test)[:, 1]
+
+rf_fpr, rf_tpr, _ = roc_curve(y_test, rf_proba)
+gb_fpr, gb_tpr, _ = roc_curve(y_test, gb_proba)
+
+rf_auc = auc(rf_fpr, rf_tpr)
+gb_auc = auc(gb_fpr, gb_tpr)
+
+print(f"Random Forest AUC: {rf_auc:.4f}")
+print(f"Gradient Boosting AUC: {gb_auc:.4f}")
+
+plt.plot(rf_fpr, rf_tpr, label=f"RF (AUC={rf_auc:.2f})")
+plt.plot(gb_fpr, gb_tpr, label=f"GB (AUC={gb_auc:.2f})")
+plt.plot([0, 1], [0, 1], linestyle='--', color='gray')
+plt.title("ROC Curve Comparison")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.legend()
+plt.show()
+
+
+
+
+
+# Save trained Random Forest model and Label Encoder for later use in predict.py
+import joblib
+
+model_path = r"C:\Users\cskbu\OneDrive\Desktop\fraudde\rf_model.pkl"
+encoder_path = r"C:\Users\cskbu\OneDrive\Desktop\fraudde\label_encoder.pkl"
+
+joblib.dump(rf, model_path)
+joblib.dump(le, encoder_path)
+
+print("✅ Model and label encoder saved.")
+
+
+
+# Add this after training your Random Forest
+importances = rf.feature_importances_
+features = X.columns
+indices = np.argsort(importances)[-10:]  # Top 10 features
+
+plt.title('Feature Importances')
+plt.barh(range(len(indices)), importances[indices], color='b', align='center')
+plt.yticks(range(len(indices)), [features[i] for i in indices])
+plt.xlabel('Relative Importance')
+plt.show()
+
+
+# Create bins for device reuse and time difference
+data['device_bin'] = pd.cut(data['num_used_device'], bins=[0,1,2,3,5,10,100])
+data['time_bin'] = pd.cut(data['diff_time'], bins=[0,60,300,600,1800,3600,86400])
+
+heatmap_data = data.groupby(['device_bin', 'time_bin'])['class'].mean().unstack()
+sns.heatmap(heatmap_data, annot=True, fmt=".0%")
+plt.title("Fraud Rates by Device Reuse and Transaction Timing")
+plt.show()
+
+
